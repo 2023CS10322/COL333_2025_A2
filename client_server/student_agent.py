@@ -1,313 +1,363 @@
 """
-Student Agent Implementation for River and Stones Game
-
-This file contains the essential utilities and template for implementing your AI agent.
-Your task is to complete the StudentAgent class with intelligent move selection.
-
-Game Rules:
-- Goal: Get 4 of your stones into the opponent's scoring area
-- Pieces can be stones or rivers (horizontal/vertical orientation)  
-- Actions: move, push, flip (stone↔river), rotate (river orientation)
-- Rivers enable flow-based movement across the board
-
-Your Task:
-Implement the choose() method in the StudentAgent class to select optimal moves.
-You may add any helper methods and modify the evaluation function as needed.
+StudentAgent — River & Stones (Minimax)
+- Classic minimax + alpha–beta (no negamax), iterative deepening (MAX_DEPTH=4)
+- Score-first evaluation: n (scored stones) >> m (1-move-to-score)
+- Threat-aware: block if opponent can score in 1
+- Branching under control (flip/rotate budget = 1), strict time/node guards
 """
 
-import random
-import copy
+import time, copy, random
 from typing import List, Dict, Any, Optional, Tuple
-from abc import ABC, abstractmethod
 
-# ==================== GAME UTILITIES ====================
-# Essential utility functions for game state analysis
+# Framework helpers (from agent.py)
+from agent import (
+    BaseAgent,
+    agent_compute_valid_moves,
+    agent_apply_move,
+    is_own_score_cell,
+    get_opponent,
+)
 
-def in_bounds(x: int, y: int, rows: int, cols: int) -> bool:
-    """Check if coordinates are within board boundaries."""
-    return 0 <= x < cols and 0 <= y < rows
+INF = 10**9
 
-def score_cols_for(cols: int) -> List[int]:
-    """Get the column indices for scoring areas."""
-    w = 4
-    start = max(0, (cols - w) // 2)
-    return list(range(start, start + w))
-
-def top_score_row() -> int:
-    """Get the row index for Circle's scoring area."""
-    return 2
-
-def bottom_score_row(rows: int) -> int:
-    """Get the row index for Square's scoring area."""
-    return rows - 3
-
-def is_opponent_score_cell(x: int, y: int, player: str, rows: int, cols: int, score_cols: List[int]) -> bool:
-    """Check if a cell is in the opponent's scoring area."""
-    if player == "circle":
-        return (y == bottom_score_row(rows)) and (x in score_cols)
-    else:
-        return (y == top_score_row()) and (x in score_cols)
-
-def is_own_score_cell(x: int, y: int, player: str, rows: int, cols: int, score_cols: List[int]) -> bool:
-    """Check if a cell is in the player's own scoring area."""
-    if player == "circle":
-        return (y == top_score_row()) and (x in score_cols)
-    else:
-        return (y == bottom_score_row(rows)) and (x in score_cols)
-
-def get_opponent(player: str) -> str:
-    """Get the opponent player identifier."""
-    return "square" if player == "circle" else "circle"
-
-# ==================== MOVE GENERATION HELPERS ====================
-
-def get_valid_moves_for_piece(board, x: int, y: int, player: str, rows: int, cols: int, score_cols: List[int]) -> List[Dict[str, Any]]:
-    """
-    Generate all valid moves for a specific piece.
-    
-    Args:
-        board: Current board state
-        x, y: Piece position
-        player: Current player
-        rows, cols: Board dimensions
-        score_cols: Scoring column indices
-    
-    Returns:
-        List of valid move dictionaries
-    """
-    moves = []
-    piece = board[y][x]
-    
-    if piece is None or piece.owner != player:
-        return moves
-    
-    directions = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-    
-    if piece.side == "stone":
-        # Stone movement
-        for dx, dy in directions:
-            nx, ny = x + dx, y + dy
-            if not in_bounds(nx, ny, rows, cols):
-                continue
-            
-            if is_opponent_score_cell(nx, ny, player, rows, cols, score_cols):
-                continue
-            
-            if board[ny][nx] is None:
-                # Simple move
-                moves.append({"action": "move", "from": [x, y], "to": [nx, ny]})
-            elif board[ny][nx].owner != player:
-                # Push move
-                px, py = nx + dx, ny + dy
-                if (in_bounds(px, py, rows, cols) and 
-                    board[py][px] is None and 
-                    not is_opponent_score_cell(px, py, player, rows, cols, score_cols)):
-                    moves.append({"action": "push", "from": [x, y], "to": [nx, ny], "pushed_to": [px, py]})
-        
-        # Stone to river flips
-        for orientation in ["horizontal", "vertical"]:
-            moves.append({"action": "flip", "from": [x, y], "orientation": orientation})
-    
-    else:  # River piece
-        # River to stone flip
-        moves.append({"action": "flip", "from": [x, y]})
-        
-        # River rotation
-        moves.append({"action": "rotate", "from": [x, y]})
-    
-    return moves
-
-def generate_all_moves(board: List[List[Any]], player: str, rows: int, cols: int, score_cols: List[int]) -> List[Dict[str, Any]]:
-    """
-    Generate all legal moves for the current player.
-    
-    Args:
-        board: Current board state
-        player: Current player ("circle" or "square")
-        rows, cols: Board dimensions
-        score_cols: Scoring column indices
-    
-    Returns:
-        List of all valid move dictionaries
-    """
-    all_moves = []
-    
-    for y in range(rows):
-        for x in range(cols):
-            piece = board[y][x]
-            if piece and piece.owner == player:
-                piece_moves = get_valid_moves_for_piece(board, x, y, player, rows, cols, score_cols)
-                all_moves.extend(piece_moves)
-    
-    return all_moves
-
-# ==================== BOARD EVALUATION ====================
-
-def count_stones_in_scoring_area(board: List[List[Any]], player: str, rows: int, cols: int, score_cols: List[int]) -> int:
-    """Count how many stones a player has in their scoring area."""
-    count = 0
-    
-    if player == "circle":
-        score_row = top_score_row()
-    else:
-        score_row = bottom_score_row(rows)
-    
-    for x in score_cols:
-        if in_bounds(x, score_row, rows, cols):
-            piece = board[score_row][x]
-            if piece and piece.owner == player and piece.side == "stone":
-                count += 1
-    
-    return count
-
-def basic_evaluate_board(board: List[List[Any]], player: str, rows: int, cols: int, score_cols: List[int]) -> float:
-    """
-    Basic board evaluation function.
-    
-    Returns a score where higher values are better for the given player.
-    Students can use this as a starting point and improve it.
-    """
-    score = 0.0
-    opponent = get_opponent(player)
-    
-    # Count stones in scoring areas
-    player_scoring_stones = count_stones_in_scoring_area(board, player, rows, cols, score_cols)
-    opponent_scoring_stones = count_stones_in_scoring_area(board, opponent, rows, cols, score_cols)
-    
-    score += player_scoring_stones * 100  
-    score -= opponent_scoring_stones * 100  
-    
-    # Count total pieces and positional factors
-    for y in range(rows):
-        for x in range(cols):
-            piece = board[y][x]
-            if piece and piece.owner == player and piece.side == "stone":
-                # Basic positional scoring
-                if player == "circle":
-                    score += (rows - y) * 0.1
-                else:
-                    score += y * 0.1
-    
-    return score
-
-def simulate_move(board: List[List[Any]], move: Dict[str, Any], player: str, rows: int, cols: int, score_cols: List[int]) -> Tuple[bool, Any]:
-    """
-    Simulate a move on a copy of the board.
-    
-    Args:
-        board: Current board state
-        move: Move to simulate
-        player: Player making the move
-        rows, cols: Board dimensions
-        score_cols: Scoring column indices
-    
-    Returns:
-        (success: bool, new_board_state or error_message)
-    """
-    # Import the game engine's move validation function
-    try:
-        from gameEngine import validate_and_apply_move
-        board_copy = copy.deepcopy(board)
-        success, message = validate_and_apply_move(board_copy, move, player, rows, cols, score_cols)
-        return success, board_copy if success else message
-    except ImportError:
-        # Fallback to basic simulation if game engine not available
-        return True, copy.deepcopy(board)
-
-# ==================== BASE AGENT CLASS ====================
-
-class BaseAgent(ABC):
-    """
-    Abstract base class for all agents.
-    """
-    
-    def __init__(self, player: str):
-        """Initialize agent with player identifier."""
-        self.player = player
-        self.opponent = get_opponent(player)
-    
-    @abstractmethod
-    def choose(self, board: List[List[Any]], rows: int, cols: int, score_cols: List[int]) -> Optional[Dict[str, Any]]:
-        """
-        Choose the best move for the current board state.
-        
-        Args:
-            board: 2D list representing the game board
-            rows, cols: Board dimensions
-            score_cols: List of column indices for scoring areas
-        
-        Returns:
-            Dictionary representing the chosen move, or None if no moves available
-        """
-        pass
-
-# ==================== STUDENT AGENT IMPLEMENTATION ====================
 
 class StudentAgent(BaseAgent):
-    """
-    Student Agent Implementation
-    
-    TODO: Implement your AI agent for the River and Stones game.
-    The goal is to get 4 of your stones into the opponent's scoring area.
-    
-    You have access to these utility functions:
-    - generate_all_moves(): Get all legal moves for current player
-    - basic_evaluate_board(): Basic position evaluation 
-    - simulate_move(): Test moves on board copy
-    - count_stones_in_scoring_area(): Count stones in scoring positions
-    """
-    
+    # ----- Evaluation Weights (make scoring dwarf everything else) -----
+    W_N = 10000   # stones already scored (ours - theirs)
+    W_M = 2000    # stones that can score in one move (ours - theirs)
+    W_MOB = 5     # small tie-breaker
+    W_POS = 1     # tiny positional tie-break
+
+    # ----- Search Limits -----
+    PER_MOVE_TIME = 0.25
+    MAX_NODES = 6000
+    MAX_DEPTH = 8
+
     def __init__(self, player: str):
         super().__init__(player)
-        # TODO: Add any initialization you need
-    
+        self.rng = random.Random(1337)
+
+    # ====================== Public API ======================
     def choose(self, board: List[List[Any]], rows: int, cols: int, score_cols: List[int]) -> Optional[Dict[str, Any]]:
-        """
-        Choose the best move for the current board state.
-        
-        Args:
-            board: 2D list representing the game board
-            rows, cols: Board dimensions  
-            score_cols: Column indices for scoring areas
-            
-        Returns:
-            Dictionary representing your chosen move
-        """
-        moves = generate_all_moves(board, self.player, rows, cols, score_cols)
-        
-        if not moves:
+        """Return a legal move dict for self.player, or None if no legal moves."""
+        root_moves = self._generate_all_moves(board, self.player, rows, cols, score_cols)
+        if not root_moves:
             return None
-        
-        # TODO: Replace random selection with your AI algorithm
-        return random.choice(moves)
 
-# ==================== TESTING HELPERS ====================
+        # (1) Immediate scorer: if any move increases n, play it immediately
+        n0 = self._count_n(board, self.player, rows, cols, score_cols)
+        for mv in root_moves:
+            ok, nb = self._sim_apply(board, mv, self.player, rows, cols, score_cols)
+            if ok and self._count_n(nb, self.player, rows, cols, score_cols) > n0:
+                return mv
 
-def test_student_agent():
-    """
-    Basic test to verify the student agent can be created and make moves.
-    """
-    print("Testing StudentAgent...")
-    
-    try:
-        from gameEngine import default_start_board, DEFAULT_ROWS, DEFAULT_COLS
-        
-        rows, cols = DEFAULT_ROWS, DEFAULT_COLS
-        score_cols = score_cols_for(cols)
-        board = default_start_board(rows, cols)
-        
-        agent = StudentAgent("circle")
-        move = agent.choose(board, rows, cols, score_cols)
-        
-        if move:
-            print("✓ Agent successfully generated a move")
+        # (2) If opponent can score in 1, restrict to defensive candidates
+        if self._count_m(board, get_opponent(self.player), rows, cols, score_cols) > 0:
+            defensive = self._defensive_candidates(board, root_moves, rows, cols, score_cols)
+            if defensive:
+                root_moves = defensive
+
+        # (3) Iterative deepening minimax (root is maximizing for self.player)
+        ordered = self._order_moves(board, root_moves, rows, cols, score_cols, self.player)
+        deadline = time.time() + self.PER_MOVE_TIME
+        best_move, best_val = ordered[0], -INF
+        nodes_total = 0
+
+        depth = 1
+        while depth <= self.MAX_DEPTH:
+            try:
+                alpha, beta = -INF, INF
+                cur_best, cur_val = None, -INF
+
+                for mv in ordered:
+                    if time.time() >= deadline or nodes_total >= self.MAX_NODES:
+                        raise TimeoutError
+                    ok, nb = self._sim_apply(board, mv, self.player, rows, cols, score_cols)
+                    if not ok:
+                        continue
+                    val, used = self._search(nb, depth - 1, alpha, beta, get_opponent(self.player), deadline)
+                    nodes_total += used
+
+                    if val > cur_val:
+                        cur_val, cur_best = val, mv
+                        if cur_val > alpha:
+                            alpha = cur_val
+
+                if cur_best is not None:
+                    best_move, best_val = cur_best, cur_val
+
+                depth += 1
+            except TimeoutError:
+                break
+
+        return best_move
+
+    # ====================== Minimax + Alpha–Beta ======================
+    def _search(self, board, depth: int, alpha: int, beta: int,
+                player_to_move: str, deadline: float) -> Tuple[int, int]:
+        """
+        Minimax with alpha–beta pruning.
+        Returns (score_from_self_perspective, nodes_used).
+        """
+        nodes_used = 0
+
+        if time.time() >= deadline:
+            raise TimeoutError
+
+        # Quick terminal via n>=4 (engine’s win condition)
+        n_self = self._count_n(board, self.player, rows=len(board), cols=len(board[0]), score_cols=self._score_cols_from_board(board))
+        n_opp  = self._count_n(board, get_opponent(self.player), rows=len(board), cols=len(board[0]), score_cols=self._score_cols_from_board(board))
+        if n_self >= 4:
+            return 100_000, 0
+        if n_opp >= 4:
+            return -100_000, 0
+
+        if depth <= 0:
+            return self._eval(board, len(board), len(board[0]), self._score_cols_from_board(board)), 1
+
+        rows = len(board); cols = len(board[0]); score_cols = self._score_cols_from_board(board)
+        moves = self._generate_all_moves(board, player_to_move, rows, cols, score_cols)
+        if not moves:
+            return self._eval(board, rows, cols, score_cols), 1
+
+        moves = self._order_moves(board, moves, rows, cols, score_cols, player_to_move)
+
+        maximizing = (player_to_move == self.player)
+
+        if maximizing:
+            best = -INF
+            for mv in moves:
+                if time.time() >= deadline:
+                    raise TimeoutError
+                ok, nb = self._sim_apply(board, mv, player_to_move, rows, cols, score_cols)
+                if not ok:
+                    continue
+                val, used = self._search(nb, depth - 1, alpha, beta, get_opponent(player_to_move), deadline)
+                nodes_used += (1 + used)
+                if val > best:
+                    best = val
+                if best > alpha:
+                    alpha = best
+                if alpha >= beta:
+                    break
+                if nodes_used >= self.MAX_NODES:
+                    break
+            return best, nodes_used
         else:
-            print("✗ Agent returned no move")
-    
-    except ImportError:
-        agent = StudentAgent("circle")
-        print("✓ StudentAgent created successfully")
+            best = +INF
+            for mv in moves:
+                if time.time() >= deadline:
+                    raise TimeoutError
+                ok, nb = self._sim_apply(board, mv, player_to_move, rows, cols, score_cols)
+                if not ok:
+                    continue
+                val, used = self._search(nb, depth - 1, alpha, beta, get_opponent(player_to_move), deadline)
+                nodes_used += (1 + used)
+                if val < best:
+                    best = val
+                if best < beta:
+                    beta = best
+                if alpha >= beta:
+                    break
+                if nodes_used >= self.MAX_NODES:
+                    break
+            return best, nodes_used
 
-if __name__ == "__main__":
-    # Run basic test when file is executed directly
-    test_student_agent()
+    # ====================== Evaluation ======================
+    def _eval(self, board, rows, cols, score_cols) -> int:
+        """Score-first heuristic: n >> m; tiny mobility/positional tie-breakers."""
+        us = self.player
+        them = get_opponent(us)
+
+        n_us   = self._count_n(board, us, rows, cols, score_cols)
+        n_them = self._count_n(board, them, rows, cols, score_cols)
+        m_us   = self._count_m(board, us, rows, cols, score_cols)
+        m_them = self._count_m(board, them, rows, cols, score_cols)
+
+        mob_us   = self._mobility(board, us, rows, cols, score_cols)
+        mob_them = self._mobility(board, them, rows, cols, score_cols)
+
+        pos = self._positional_tiebreak(board, rows, cols, score_cols)
+
+        return (self.W_N * (n_us - n_them) +
+                self.W_M * (m_us - m_them) +
+                self.W_MOB * (mob_us - mob_them) +
+                self.W_POS * pos)
+
+    def _count_n(self, board, player, rows, cols, score_cols) -> int:
+        total = 0
+        for y in range(rows):
+            for x in range(cols):
+                p = board[y][x]
+                if p and p.owner == player and getattr(p, "side", "stone") == "stone":
+                    if is_own_score_cell(x, y, player, rows, cols, score_cols):
+                        total += 1
+        return total
+
+    def _count_m(self, board, player, rows, cols, score_cols) -> int:
+        """
+        Stones of 'player' that can reach their scoring cell in ONE legal move
+        (including river sweeps and pushes). Count each stone once.
+        """
+        m = 0
+        for y in range(rows):
+            for x in range(cols):
+                p = board[y][x]
+                if not p or p.owner != player or getattr(p, "side", "stone") != "stone":
+                    continue
+                info = agent_compute_valid_moves(board, x, y, player, rows, cols, score_cols)
+                # direct/river moves
+                for (tx, ty) in info.get("moves", ()):
+                    if is_own_score_cell(tx, ty, player, rows, cols, score_cols):
+                        m += 1
+                        break
+                else:
+                    # pushes: own_final (ox,oy) is where OUR piece goes
+                    for ((ox, oy), (_px, _py)) in info.get("pushes", ()):
+                        if is_own_score_cell(ox, oy, player, rows, cols, score_cols):
+                            m += 1
+                            break
+        return m
+
+    def _mobility(self, board, player, rows, cols, score_cols) -> int:
+        total = 0
+        for y in range(rows):
+            for x in range(cols):
+                p = board[y][x]
+                if not p or p.owner != player:
+                    continue
+                info = agent_compute_valid_moves(board, x, y, player, rows, cols, score_cols)
+                total += len(info.get("moves", ())) + len(info.get("pushes", ()))
+        return total
+
+    def _positional_tiebreak(self, board, rows, cols, score_cols) -> int:
+        """Reward being closer to own scoring row (small effect)."""
+        def own_row(plr: str) -> int:
+            # Find the y that contains any own scoring cell for plr
+            for yy in range(rows):
+                for xx in score_cols:
+                    if is_own_score_cell(xx, yy, plr, rows, cols, score_cols):
+                        return yy
+            return 0 if plr == "circle" else rows - 1
+
+        def score_player(plr: str) -> int:
+            s = 0
+            tr = own_row(plr)
+            for y in range(rows):
+                for x in range(cols):
+                    p = board[y][x]
+                    if p and p.owner == plr and getattr(p, "side", "stone") == "stone":
+                        s -= abs(y - tr)
+            return s
+
+        return score_player(self.player) - score_player(get_opponent(self.player))
+
+    # ====================== Move Gen & Ordering ======================
+    def _generate_all_moves(self, board, player, rows, cols, score_cols) -> List[Dict[str, Any]]:
+        """
+        Build all legal move dicts for 'player'.
+        - Moves & pushes via agent_compute_valid_moves (rule-correct).
+        - Include a tiny budget of flip/rotate options (engine validates).
+        """
+        out: List[Dict[str, Any]] = []
+        flip_rotate_budget = 1   # SMALL to keep branching down
+        flips_added = 0
+
+        for y in range(rows):
+            for x in range(cols):
+                p = board[y][x]
+                if not p or p.owner != player:
+                    continue
+
+                info = agent_compute_valid_moves(board, x, y, player, rows, cols, score_cols)
+
+                for (tx, ty) in info.get("moves", ()):
+                    out.append({"action": "move", "from": [x, y], "to": [tx, ty]})
+
+                for ((ox, oy), (px, py)) in info.get("pushes", ()):
+                    out.append({"action": "push",
+                                "from": [x, y],
+                                "to": [ox, oy],
+                                "pushed_to": [px, py]})
+
+                # budgeted flips/rotates (one piece contributes at most once)
+                if flips_added < flip_rotate_budget:
+                    if getattr(p, "side", "stone") == "stone":
+                        out.append({"action": "flip", "from": [x, y], "orientation": "horizontal"})
+                        out.append({"action": "flip", "from": [x, y], "orientation": "vertical"})
+                    else:
+                        out.append({"action": "flip", "from": [x, y]})
+                        out.append({"action": "rotate", "from": [x, y]})
+                    flips_added += 1
+                    # don't add more flip/rotates for this same piece in this ply
+                    continue
+
+        return out
+
+    def _order_moves(self, board, moves, rows, cols, score_cols, player_to_move) -> List[Dict[str, Any]]:
+        """
+        Ordering for strong αβ pruning:
+        1) finishers (make n>=4),
+        2) urgent defense (reduce opponent m),
+        3) pushes,
+        4) flips/rotates,
+        5) other moves (mild centrality).
+        """
+        current_n = self._count_n(board, player_to_move, rows, cols, score_cols)
+        opp = get_opponent(player_to_move)
+        m_opp0 = self._count_m(board, opp, rows, cols, score_cols)
+
+        def score_move(mv: Dict[str, Any]) -> int:
+            s = 0
+            # Finisher?
+            if self._is_finisher_after(board, mv, current_n, rows, cols, score_cols, player_to_move):
+                s += 10000
+
+            # Urgent defense: reduce opponent 1-move scoring chances
+            ok, nb = self._sim_apply(board, mv, player_to_move, rows, cols, score_cols)
+            if ok:
+                m_opp1 = self._count_m(nb, opp, rows, cols, score_cols)
+                if m_opp1 < m_opp0:
+                    s += 1500
+
+            # Tactical > structural
+            if mv.get("action") == "push":
+                s += 300
+            elif mv.get("action") in ("flip", "rotate"):
+                s += 60
+            elif mv.get("action") == "move":
+                fr = mv.get("from", [0, 0]); to = mv.get("to", fr)
+                s += -(abs(to[0] - cols // 2) + abs(to[1] - rows // 2))
+
+            return s
+
+        return sorted(moves, key=score_move, reverse=True)
+
+    # ====================== Helpers ======================
+    def _sim_apply(self, board, move, player, rows, cols, score_cols):
+        """Apply a move on a deep-copied board using the engine validator."""
+        bcopy = copy.deepcopy(board)
+        ok, msg = agent_apply_move(bcopy, move, player, rows, cols, score_cols)
+        return ok, (bcopy if ok else msg)
+
+    def _is_finisher_after(self, board, move, current_n, rows, cols, score_cols, mover):
+        ok, nb = self._sim_apply(board, move, mover, rows, cols, score_cols)
+        return ok and self._count_n(nb, mover, rows, cols, score_cols) >= 4
+
+    def _defensive_candidates(self, board, moves, rows, cols, score_cols):
+        """Keep moves that reduce opponent m (1-move to score)."""
+        them = get_opponent(self.player)
+        m0 = self._count_m(board, them, rows, cols, score_cols)
+        keep = []
+        for mv in moves:
+            ok, nb = self._sim_apply(board, mv, self.player, rows, cols, score_cols)
+            if ok and self._count_m(nb, them, rows, cols, score_cols) < m0:
+                keep.append(mv)
+        return keep
+
+    def _score_cols_from_board(self, board):
+        """Infer score_cols from board width: middle 4 columns as used by engine helpers."""
+        cols = len(board[0])
+        w = 4
+        start = max(0, (cols - w) // 2)
+        return list(range(start, start + w))
